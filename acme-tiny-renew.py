@@ -126,7 +126,7 @@ def install_certs(install_dir, cert_file_name, domain_cert, intermediate_cert, r
         out_file.write(root_cert)
 
 
-def do_renew(logger_manager, renew_config, renew_config_name, is_force, is_dry_run):
+def do_renew(logger_manager, renew_config, renew_config_name, renew_args):
 
     """ Do the actual renewal. Arguments are the config (and its name) and whether or not to force the
         renewal, or do a dry run """
@@ -139,10 +139,14 @@ def do_renew(logger_manager, renew_config, renew_config_name, is_force, is_dry_r
 
     domain_cert_name = renew_config.get("domain_cert")
 
+    # We do not want to overwrite the real cert with a staging version.
+    if renew_args.staging:
+        domain_cert_name = "staging_" + domain_cert_name
+
     # Check if this cert exists, and if it does, does it need renewal?
     if os.path.isfile(domain_cert_name):
 
-        if not is_force:
+        if not renew_args.force:
             # default to requires renewal within 7 days of time left.
             try:
                 renew_min_timeleft = int(renew_config.get("renew_min_timeleft"), 7)
@@ -187,6 +191,9 @@ def do_renew(logger_manager, renew_config, renew_config_name, is_force, is_dry_r
                                                                     renew_config.get("domain_csr"),
                                                                     challenge_dir)
 
+    if renew_args.staging:
+        renew_command = renew_command + "--directory-url https://acme-staging-v02.api.letsencrypt.org/directory"
+
     exec_success, domain_cert = do_shell_exec(renew_command)
 
     if not exec_success:
@@ -208,38 +215,49 @@ def do_renew(logger_manager, renew_config, renew_config_name, is_force, is_dry_r
 
     if "Let's Encrypt" in cert_issuer:
 
-        root_cert_url = "https://letsencrypt.org/certs/isrgrootx1.pem"
+        if renew_args.staging:
+            root_cert_url = "https://letsencrypt.org/certs/isrgrootx1.pem"
+        else:
+            root_cert_url = "https://letsencrypt.org/certs/staging/letsencrypt-stg-root-x1.pem"
 
         # All X'es are now retired
-        if "X1" in cert_issuer:
+        if "X1" in cert_issuer and not renew_args.staging:
             intermediate_cert_url = "https://letsencrypt.org/certs/lets-encrypt-x1-cross-signed.pem"
 
-        elif "X2" in cert_issuer:
+        elif "X2" in cert_issuer and not renew_args.staging:
             intermediate_cert_url = "https://letsencrypt.org/certs/lets-encrypt-x2-cross-signed.pem"
 
-        elif "X3" in cert_issuer:
+        elif "X3" in cert_issuer and not renew_args.staging:
             intermediate_cert_url = "https://letsencrypt.org/certs/lets-encrypt-x3-cross-signed.pem"
 
-        elif "X4" in cert_issuer:
+        elif "X4" in cert_issuer and not renew_args.staging:
             intermediate_cert_url = "https://letsencrypt.org/certs/lets-encrypt-x4-cross-signed.pem"
 
         # Active
         elif "R3" in cert_issuer:
-            intermediate_cert_url = "https://letsencrypt.org/certs/lets-encrypt-r3-cross-signed.pem"
+            if renew_args.staging:
+                intermediate_cert_url = "https://letsencrypt.org/certs/staging/letsencrypt-stg-int-r3.pem"
+            else:
+                intermediate_cert_url = "https://letsencrypt.org/certs/lets-encrypt-r3-cross-signed.pem"
 
         # Disaster Backup
-        elif "R4" in cert_issuer:
+        elif "R4" in cert_issuer and not renew_args.staging:
             intermediate_cert_url = "https://letsencrypt.org/certs/lets-encrypt-r4-cross-signed.pem"
 
         # Coming Soon...
-        elif "E1" in cert_issuer:
+        elif "E1" in cert_issuer and not renew_args.staging:
             root_cert_url = "https://letsencrypt.org/certs/isrg-root-x2-cross-signed.pem"
             intermediate_cert_url = "https://letsencrypt.org/certs/lets-encrypt-e1.pem"
 
         # Disaster Backup
-        elif "E2" in cert_issuer:
+        elif "E2" in cert_issuer and not renew_args.staging:
             root_cert_url = "https://letsencrypt.org/certs/isrg-root-x2-cross-signed.pem"
             intermediate_cert_url = "https://letsencrypt.org/certs/lets-encrypt-e2.pem"
+
+        # Script needs updating?
+        else:
+            raise RenewError(renew_config_name,
+                             "Unknown Certificate Issuer {}".format(cert_issuer))
 
     else:
         # unsupported issuer (todo, add more here)
@@ -299,10 +317,18 @@ def do_renew(logger_manager, renew_config, renew_config_name, is_force, is_dry_r
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description='acme-tiny-renew')
-    parser.add_argument('-c', '--config', help='Input config file', type = argparse.FileType('r'), required = True)
-    parser.add_argument('-v', '--verbose', action='store_true', help='Log to standard out')
-    parser.add_argument('-f', '--force', action='store_true', help='Force certificate renewal even if not required')
-    parser.add_argument('-d', '--dry_run', action='store_true', help='Do not actually renew certificate, just do a dry run')
+    parser.add_argument('-c', '--config', help='Input config file',
+                        type = argparse.FileType('r'), required = True)
+    parser.add_argument('-v', '--verbose', action='store_true',
+                        help='Log to standard out')
+
+    options_group = parser.add_mutually_exclusive_group()
+    options_group.add_argument('-f', '--force', action='store_true',
+                               help='Force certificate renewal even if not required')
+    options_group.add_argument('-d', '--dry_run', action='store_true',
+                               help='Do not actually renew certificate, just do a dry run')
+    options_group.add_argument('-s', '--staging', action='store_true',
+                           help='Use lets encrypt staging environment (test setup)')
     args = parser.parse_args()
 
     if os.geteuid() == 0:
@@ -319,7 +345,7 @@ if __name__ == "__main__":
 
         try:
             setup_logging(logger_manager, renew_config, section_name)
-            do_renew(logger_manager, renew_config, section_name, args.force, args.dry_run)
+            do_renew(logger_manager, renew_config, section_name, args)
 
         except ConfigError as e:
             logger_manager.log(Loglevel.ERROR, "In Section {} : {}".format(e.GetSection(),
