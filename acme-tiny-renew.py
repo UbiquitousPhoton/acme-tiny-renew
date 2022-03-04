@@ -186,6 +186,10 @@ def do_renew(logger_manager, renew_config, renew_config_name, renew_args):
     if not os.path.isdir(challenge_dir):
         raise ConfigError(renew_config_name, "Challenge dir {} does not exist or is not directory".format(challenge_dir))
 
+    if renew_args.dry_run:
+        logger_manager.log(Loglevel.INFO, "Not actually renewing cert, dry run only.")
+        return
+
     renew_command = "{} --account-key {} --csr {} --acme-dir {}".format(acme_tiny_command,
                                                                     renew_config.get("account_key"),
                                                                     renew_config.get("domain_csr"),
