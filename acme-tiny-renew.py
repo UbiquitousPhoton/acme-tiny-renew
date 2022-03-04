@@ -42,6 +42,8 @@ from exceptions import *
 
 def check_elements(element_list, required_element_list, logger_manager, section_name):
 
+    """ Check if a required list of elements are all in the config file """
+
     for element in required_element_list:
         if element not in element_list:
             raise ConfigError(section_name, "Essential element {} not found".format(element))
@@ -50,6 +52,8 @@ def check_elements(element_list, required_element_list, logger_manager, section_
     return True
 
 def do_shell_exec(exec_string, expected_result = 0):
+
+    """ Execute the given string in a shell, try to ascertain success """
 
     shell_process = Popen(split(exec_string), stdin=PIPE, stdout=PIPE, stderr=PIPE)
 
@@ -62,6 +66,8 @@ def do_shell_exec(exec_string, expected_result = 0):
         return True, shell_stdout.decode("utf-8")
 
 def setup_logging(logger_manager, config_section, config_section_name):
+
+    """ Setup logging dependant on the contents of the config file """
 
     essential_mail_elements = ["mail_to", "mail_from", "mail_server"]
     mail_elements = essential_mail_elements.copy()
@@ -97,6 +103,9 @@ def setup_logging(logger_manager, config_section, config_section_name):
 
 def install_certs(install_dir, cert_file_name, domain_cert, intermediate_cert, root_cert):
 
+    """ Install certs (stored as ascii in arguments) to given directory, as variants of the
+        base cert name given. """
+
     cert_filename_base, cert_filename_extension = os.path.splitext(cert_file_name)
 
     with open(os.path.join(install_dir, cert_file_name), "w") as out_file:
@@ -118,6 +127,9 @@ def install_certs(install_dir, cert_file_name, domain_cert, intermediate_cert, r
 
 
 def do_renew(logger_manager, renew_config, renew_config_name, is_force, is_dry_run):
+
+    """ Do the actual renewal. Arguments are the config (and its name) and whether or not to force the
+        renewal, or do a dry run """
 
     essential_elements = ["domain_name", "domain_csr", "account_key", "challenge_dir", "domain_cert"]
 
