@@ -36,6 +36,8 @@ from datetime import datetime
 import shlex
 from enum import Enum
 import requests
+from traceback import format_exc
+from tempfile import mkstemp
 
 from LoggerManager.loggermanager import Logger_Manager, Loglevel
 from exceptions import *
@@ -55,15 +57,15 @@ def do_shell_exec(exec_string, expected_result = 0):
 
     """ Execute the given string in a shell, try to ascertain success """
 
-    shell_process = Popen(split(exec_string), stdin=PIPE, stdout=PIPE, stderr=PIPE)
+    shell_process = Popen(shlex.split(exec_string), stdin=PIPE, stdout=PIPE, stderr=PIPE)
 
     (shell_stdout, shell_stderr) = shell_process.communicate()
 
     if shell_process.returncode != expected_result:
-        return False, shell_stdout.decode("utf-8")
+        return False, shell_stdout.decode("utf-8"), shell_stderr.decode("utf-8")
 
     else:
-        return True, shell_stdout.decode("utf-8")
+        return True, shell_stdout.decode("utf-8"), shell_stderr.decode("utf-8")
 
 def setup_logging(logger_manager, config_section, config_section_name):
 
@@ -156,7 +158,7 @@ def do_renew(logger_manager, renew_config, renew_config_name, renew_args):
 
 
             # time left is measured in days, we need in seconds.
-            exec_success, checkend_output = do_shell_exec("openssl x509 -in {} -checkend {}".format(domain_cert_name,
+            exec_success, checkend_output, checkend_error = do_shell_exec("openssl x509 -in {} -checkend {}".format(domain_cert_name,
                                                                 renew_min_timeleft * 24 * 60 * 60))
 
             if exec_success:
@@ -179,7 +181,7 @@ def do_renew(logger_manager, renew_config, renew_config_name, renew_args):
     if acme_tiny_dir == "":
         acme_tiny_command = renew_config.get("acme_tiny_command", "acme-tiny")
     else:
-        acme_tiny_command = "{}/acme-tiny.py".format(acme_tiny_dir.rstrip().rstrip("/"))
+        acme_tiny_command = "{}/acme_tiny.py".format(acme_tiny_dir.rstrip().rstrip("/"))
 
     challenge_dir = renew_config.get("challenge_dir", "")
 
@@ -198,24 +200,25 @@ def do_renew(logger_manager, renew_config, renew_config_name, renew_args):
     if renew_args.staging:
         renew_command = renew_command + "--directory-url https://acme-staging-v02.api.letsencrypt.org/directory"
 
-    exec_success, domain_cert = do_shell_exec(renew_command)
+    exec_success, domain_cert, exec_error = do_shell_exec(renew_command)
 
     if not exec_success:
-        raise RenewError(renew_config_name, "Failed to renew cert {}".format(domain_cert))
+        raise RenewError(renew_config_name, "Failed to renew cert {}".format(exec_error))
 
     logger_manager.log(Loglevel.INFO, "Cert renewed and fetched.")
     # Write this to a temp file, as we need to be able to work on it
-    temp_file, temp_file_name = tempfile.mkstemp()
-    temp_file.write(domain_cert)
-    os.close(temp_file)
+    temp_file_handle, temp_file_name = mkstemp()
+
+    with os.fdopen(temp_file_handle, "w") as temp_file:
+        temp_file.write(domain_cert)
 
     # Figure out our issuer in order to download download trust chain.
-    exec_success, cert_issuer = do_shell_exec("openssl x509 -in {} -issuer -noout".format(temp_file_name))
+    exec_success, cert_issuer, exec_error = do_shell_exec("openssl x509 -in {} -issuer -noout".format(temp_file_name))
 
     os.unlink(temp_file_name)
 
     if not exec_success:
-        raise RenewError(renew_config_name, "Failed to get issuer for cert : {}".format(cert_issuer))
+        raise RenewError(renew_config_name, "Failed to get issuer for cert : {}".format(exec_error))
 
     if "Let's Encrypt" in cert_issuer:
 
@@ -310,12 +313,12 @@ def do_renew(logger_manager, renew_config, renew_config_name, renew_args):
 
             install_certs(install_dir, domain_cert_file, domain_cert, intermediate_cert, root_cert)
 
-            logger_manager.log(Logleve.INFO, "Installed certs to {}".format(install_dir))
+            logger_manager.log(Loglevel.INFO, "Installed certs to {}".format(install_dir))
 
     # Can use post sync as hook to restart servers (if setup correctly)
     # Yes, this is dangerous, use with care, do not run script as root.
     if "post_sync" in renew_config:
-        exec_success, checkend_output = do_shell_exec(renew_config.get("post_sync"))
+        exec_success, checkend_output, exec_error = do_shell_exec(renew_config.get("post_sync"))
 
 
 if __name__ == "__main__":
@@ -339,7 +342,7 @@ if __name__ == "__main__":
         exit("Running this script as root is not recommended, use sudo priviledges instead.")
 
     config = configparser.ConfigParser()
-    config.read_file(args.config_file)
+    config.read_file(args.config)
 
     logger_manager = Logger_Manager()
 
