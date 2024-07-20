@@ -31,6 +31,7 @@ import argparse
 import configparser
 import socket
 import sys
+import re
 from subprocess import Popen, PIPE
 from datetime import datetime
 import shlex
@@ -128,7 +129,7 @@ def install_certs(install_dir, cert_file_name, domain_cert, intermediate_cert, r
         out_file.write(root_cert)
 
 
-def do_renew(logger_manager, renew_config, renew_config_name, renew_args):
+def do_renew(logger_manager, renew_config, renew_config_name, renew_args, issuer_map):
 
     """ Do the actual renewal. Arguments are the config (and its name) and whether or not to force the
         renewal, or do a dry run """
@@ -220,55 +221,29 @@ def do_renew(logger_manager, renew_config, renew_config_name, renew_args):
     if not exec_success:
         raise RenewError(renew_config_name, "Failed to get issuer for cert : {}".format(exec_error))
 
-    if "Let's Encrypt" in cert_issuer:
+    issuer_regex = re.compile(r"/C=(?P<Country>.+)/O=(?P<Organisation>.+)/CN=(?P<CommonName>.+)")
 
-        if renew_args.staging:
-            root_cert_url = "https://letsencrypt.org/certs/isrgrootx1.pem"
-        else:
-            root_cert_url = "https://letsencrypt.org/certs/staging/letsencrypt-stg-root-x1.pem"
+    issuer_matches = issuer_regex.search(cert_issuer)
 
-        # All X'es are now retired
-        if "X1" in cert_issuer and not renew_args.staging:
-            intermediate_cert_url = "https://letsencrypt.org/certs/lets-encrypt-x1-cross-signed.pem"
+    cert_org = issuer_matches.group('Organisation')
 
-        elif "X2" in cert_issuer and not renew_args.staging:
-            intermediate_cert_url = "https://letsencrypt.org/certs/lets-encrypt-x2-cross-signed.pem"
+    if cert_org != "Let's Encrypt":
+        # Not a Let's Encrypt cert?
+        raise RenewError(renew_config_name, "Unknown certificate issuer org: {}".format(cert_org))
 
-        elif "X3" in cert_issuer and not renew_args.staging:
-            intermediate_cert_url = "https://letsencrypt.org/certs/lets-encrypt-x3-cross-signed.pem"
+    if not renew_args.staging:
+        root_cert_url = "https://letsencrypt.org/certs/isrgrootx1.pem"
 
-        elif "X4" in cert_issuer and not renew_args.staging:
-            intermediate_cert_url = "https://letsencrypt.org/certs/lets-encrypt-x4-cross-signed.pem"
+        cert_cn = issuer_matches.group('CommonName')
 
-        # Active
-        elif "R3" in cert_issuer:
-            if renew_args.staging:
-                intermediate_cert_url = "https://letsencrypt.org/certs/staging/letsencrypt-stg-int-r3.pem"
-            else:
-                intermediate_cert_url = "https://letsencrypt.org/certs/lets-encrypt-r3-cross-signed.pem"
-
-        # Disaster Backup
-        elif "R4" in cert_issuer and not renew_args.staging:
-            intermediate_cert_url = "https://letsencrypt.org/certs/lets-encrypt-r4-cross-signed.pem"
-
-        # Coming Soon...
-        elif "E1" in cert_issuer and not renew_args.staging:
-            root_cert_url = "https://letsencrypt.org/certs/isrg-root-x2-cross-signed.pem"
-            intermediate_cert_url = "https://letsencrypt.org/certs/lets-encrypt-e1.pem"
-
-        # Disaster Backup
-        elif "E2" in cert_issuer and not renew_args.staging:
-            root_cert_url = "https://letsencrypt.org/certs/isrg-root-x2-cross-signed.pem"
-            intermediate_cert_url = "https://letsencrypt.org/certs/lets-encrypt-e2.pem"
-
-        # Script needs updating?
+        if cert_cn in issuer_map.keys():
+            intermediate_cert_url = issuer_map[cert_cn]
         else:
             raise RenewError(renew_config_name,
-                             "Unknown Certificate Issuer {}".format(cert_issuer))
+                             "Unknown certificate issuer CN {}".format(cert_cn))
 
     else:
-        # unsupported issuer (todo, add more here)
-        raise RenewError(renew_config_name, "Unknown Certificate Issuer {}".format(cert_issuer))
+        root_cert_url = "https://letsencrypt.org/certs/staging/letsencrypt-stg-root-x1.pem"
 
     root_cert_request = requests.get(root_cert_url);
 
@@ -278,14 +253,17 @@ def do_renew(logger_manager, renew_config, renew_config_name, renew_args):
     logger_manager.log(Loglevel.INFO, "Downloaded root cert from {}".format(root_cert_url))
     root_cert = root_cert_request.text
 
-    intermediate_cert_request = requests.get(intermediate_cert_url)
+    if not renew_args.staging:
+        intermediate_cert_request = requests.get(intermediate_cert_url)
 
-    if not intermediate_cert_request.ok:
-        raise RenewError(renew_config_name,
-                         "Failed to download intermediate cert from {}".format(intermediate_cert_url))
+        if not intermediate_cert_request.ok:
+            raise RenewError(renew_config_name,
+                             "Failed to download intermediate cert from {}".format(intermediate_cert_url))
 
-    logger_manager.log(Loglevel.INFO, "Downloaded intermediate cert from {}".format(intermediate_cert_url))
-    intermediate_cert = intermediate_cert_request.text
+        logger_manager.log(Loglevel.INFO, "Downloaded intermediate cert from {}".format(intermediate_cert_url))
+        intermediate_cert = intermediate_cert_request.text
+    else:
+        intermediate_cert = ''
 
     # install.
     domain_cert_dir, domain_cert_file = os.path.split(domain_cert_name)
@@ -346,13 +324,22 @@ if __name__ == "__main__":
 
     logger_manager = Logger_Manager()
 
+    issuer_map = {}
+
+    # Add all cert providers, including backups.
+    for issuer_no in range(5, 19):
+        issuer_map['E{}'.format(issuer_no)] = 'https://letsencrypt.org/certs/2024/e{}.pem'.format(issuer_no)
+
+    for issuer_no in range(10, 15):
+        issuer_map['R{}'.format(issuer_no)] = 'https://letsencrypt.org/certs/2024/r{}.pem'.format(issuer_no)
+
     for section_name in config.sections():
 
         renew_config = config[section_name]
 
         try:
             setup_logging(logger_manager, renew_config, section_name)
-            do_renew(logger_manager, renew_config, section_name, args)
+            do_renew(logger_manager, renew_config, section_name, args, issuer_map)
 
         except ConfigError as e:
             logger_manager.log(Loglevel.ERROR, "In Section {} : {}".format(e.GetSection(),
