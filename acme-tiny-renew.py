@@ -333,6 +333,10 @@ if __name__ == "__main__":
     for issuer_no in range(10, 15):
         issuer_map['R{}'.format(issuer_no)] = 'https://letsencrypt.org/certs/2024/r{}.pem'.format(issuer_no)
 
+    for issuer in range(1, 2):
+        issuer_map[f'YE{issuer_no}'] = f'https://letsencrypt.org/certs/gen-y/int-ye{issuer_no}.pem'
+        issuer_map[f'YR{issuer_no}'] = f'https://letsencrypt.org/certs/gen-y/int-yr{issuer_no}.pem'
+
     for section_name in config.sections():
 
         renew_config = config[section_name]
