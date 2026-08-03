@@ -225,6 +225,9 @@ def do_renew(logger_manager, renew_config, renew_config_name, renew_args, issuer
 
     issuer_matches = issuer_regex.search(cert_issuer)
 
+    if issuer_matches == None:
+        raise RenewError(renew_config_name, "Unknown certificate issuer: {}".format(cert_issuer))
+
     cert_org = issuer_matches.group('Organisation')
 
     if cert_org != "Let's Encrypt":
