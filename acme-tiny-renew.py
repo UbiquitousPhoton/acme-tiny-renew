@@ -31,14 +31,16 @@ import argparse
 import configparser
 import socket
 import sys
-import re
-from subprocess import Popen, PIPE
+#import re
+from subprocess import Popen, PIPE, CalledProcessError, run
 from datetime import datetime
 import shlex
-from enum import Enum
+#from enum import Enum
 import requests
 from traceback import format_exc
-from tempfile import mkstemp
+#from tempfile import mkstemp
+from cryptography import x509
+from datetime import datetime, timedelta, timezone
 
 from LoggerManager.loggermanager import Logger_Manager, Loglevel
 from exceptions import *
@@ -104,24 +106,35 @@ def setup_logging(logger_manager, config_section, config_section_name):
     else:
         return True
 
-def install_certs(install_dir, cert_file_name, domain_cert, intermediate_cert, root_cert):
+def install_certs(install_dir, cert_file_name, domain_cert, intermediate_cert, root_cert, staging):
 
     """ Install certs (stored as ascii in arguments) to given directory, as variants of the
         base cert name given. """
 
     cert_filename_base, cert_filename_extension = os.path.splitext(cert_file_name)
 
+    if staging:
+        cert_file_name = "staging_" + cert_file_name
+
     with open(os.path.join(install_dir, cert_file_name), "w") as out_file:
         out_file.write(domain_cert)
 
-    with open(os.path.join(install_dir, "{}_chained{}".format(cert_filename_base,
-                                                              cert_filename_extension)), "w") as out_file:
+    chained_file_name = f"{cert_filename_base}_chained{cert_filename_extension}"
+
+    if staging:
+        chained_file_name = "staging_" + chained_file_name
+
+    with open(os.path.join(install_dir, chained_file_name), "w") as out_file:
         out_file.write(domain_cert)
         out_file.write("\n\n")
         out_file.write(intermediate_cert)
 
-    with open(os.path.join(install_dir, "{}_full{}".format(cert_filename_base,
-                                                           cert_filename_extension)), "w") as out_file:
+    full_file_name = f"{cert_filename_base}_full{cert_filename_extension}"
+
+    if staging:
+        full_file_name = "staging_" + full_file_name
+
+    with open(os.path.join(install_dir, full_file_name), "w") as out_file:
         out_file.write(domain_cert)
         out_file.write("\n\n")
         out_file.write(intermediate_cert)
@@ -139,12 +152,7 @@ def do_renew(logger_manager, renew_config, renew_config_name, renew_args, issuer
     if not check_elements(renew_config, essential_elements, logger_manager, renew_config_name):
         return False
 
-
     domain_cert_name = renew_config.get("domain_cert")
-
-    # We do not want to overwrite the real cert with a staging version.
-    if renew_args.staging:
-        domain_cert_name = "staging_" + domain_cert_name
 
     # Check if this cert exists, and if it does, does it need renewal?
     if os.path.isfile(domain_cert_name):
@@ -157,19 +165,18 @@ def do_renew(logger_manager, renew_config, renew_config_name, renew_args, issuer
             except ValueError:
                 raise ConfigError(renew_config_name, "renew_min_timeleft is not a number")
 
+            with open(domain_cert_name, "rb") as cert_file:
+                cert = x509.load_pem_x509_certificate(cert_file.read())
 
-            # time left is measured in days, we need in seconds.
-            exec_success, checkend_output, checkend_error = do_shell_exec("openssl x509 -in {} -checkend {}".format(domain_cert_name,
-                                                                renew_min_timeleft * 24 * 60 * 60))
+                expiry_delta = cert.not_valid_after_utc - datetime.now(timezone.utc)
+                min_delta = timedelta(days=renew_min_timeleft)
 
-            if exec_success:
-                # Don't actually need to renew this one
-                logger_manager.log(Loglevel.INFO,
-                                   "Cert exists, but does not require renewal within {} days".format(renew_min_timeleft))
-                return False
-            else:
-                logger_manager.log(Loglevel.INFO,
+                if expiry_delta < min_delta:                 
+                    logger_manager.log(Loglevel.INFO,
                                    "Cert exists, but requires renewal (within {} days), attempting renewal...".format(renew_min_timeleft))
+                else:
+                    logger_manager.log(Loglevel.INFO, "Cert exists, but does not require renewal within {} days ({} days left )".format(renew_min_timeleft, expiry_delta.days))
+                    return False
         else:
             logger_manager.log(Loglevel.INFO, "Cert exists, but --force has been used, attempting renewal...")
 
@@ -193,57 +200,60 @@ def do_renew(logger_manager, renew_config, renew_config_name, renew_args, issuer
         logger_manager.log(Loglevel.INFO, "Not actually renewing cert, dry run only.")
         return
 
-    renew_command = "{} --account-key {} --csr {} --acme-dir {}".format(acme_tiny_command,
-                                                                    renew_config.get("account_key"),
-                                                                    renew_config.get("domain_csr"),
-                                                                    challenge_dir)
+    acme_tiny_args = [acme_tiny_command,
+         "--account-key", renew_config.get("account_key"),
+         "--csr", renew_config.get("domain_csr"),
+         "--acme-dir", challenge_dir
+         ]
 
     if renew_args.staging:
-        renew_command = renew_command + "--directory-url https://acme-staging-v02.api.letsencrypt.org/directory"
+        acme_tiny_args += ["--directory-url", "https://acme-staging-v02.api.letsencrypt.org/directory"]
 
-    exec_success, domain_cert, exec_error = do_shell_exec(renew_command)
+    acme_tiny_result = run(
+        acme_tiny_args,
+        capture_output=True,
+        check=True,
+#        text=True,
+#        cwd=source_dir,
+    )
 
-    if not exec_success:
-        raise RenewError(renew_config_name, "Failed to renew cert {}".format(exec_error))
+
+    # renew_command = "{} --account-key {} --csr {} --acme-dir {}".format(acme_tiny_command,
+    #                                                                 renew_config.get("account_key")y,
+    #                                                                 renew_config.get("domain_csr"),
+    #                                                                 challenge_dir)
+
+    # if renew_args.staging:
+    #     renew_command = renew_command + "--directory-url https://acme-staging-v02.api.letsencrypt.org/directory"
+
+    # exec_success, domain_cert, exec_error = do_shell_exec(renew_command)
+
+    # if not exec_success:
+    #     raise RenewError(renew_config_name, "Failed to renew cert {}".format(exec_error))
 
     logger_manager.log(Loglevel.INFO, "Cert renewed and fetched.")
-    # Write this to a temp file, as we need to be able to work on it
-    temp_file_handle, temp_file_name = mkstemp()
 
-    with os.fdopen(temp_file_handle, "w") as temp_file:
-        temp_file.write(domain_cert)
 
-    # Figure out our issuer in order to download download trust chain.
-    exec_success, cert_issuer, exec_error = do_shell_exec("openssl x509 -in {} -issuer -noout".format(temp_file_name))
+    cert = x509.load_pem_x509_certificate(acme_tiny_result.stdout)
 
-    os.unlink(temp_file_name)
+    cert_org = ""
+    cert_cn = ""
 
-    if not exec_success:
-        raise RenewError(renew_config_name, "Failed to get issuer for cert : {}".format(exec_error))
+    for attribute in cert.issuer:
+        
+        if attribute.oid.dotted_string == "2.5.4.10":
+            cert_org = attribute.value
+        elif attribute.oid.dotted_string == "2.5.4.3":
+            cert_cn = attribute.value
 
-    issuer_regex = re.compile(r"/C=(?P<Country>.+)/O=(?P<Organisation>.+)/CN=(?P<CommonName>.+)")
-
-    issuer_matches = issuer_regex.search(cert_issuer)
-
-    if issuer_matches == None:
-        raise RenewError(renew_config_name, "Unknown certificate issuer: {}".format(cert_issuer))
-
-    cert_org = issuer_matches.group('Organisation')
-
+    domain_cert = acme_tiny_result.stdout.decode("utf-8")
+    
     if cert_org != "Let's Encrypt":
         # Not a Let's Encrypt cert?
         raise RenewError(renew_config_name, "Unknown certificate issuer org: {}".format(cert_org))
 
     if not renew_args.staging:
         root_cert_url = "https://letsencrypt.org/certs/isrgrootx1.pem"
-
-        cert_cn = issuer_matches.group('CommonName')
-
-        if cert_cn in issuer_map.keys():
-            intermediate_cert_url = issuer_map[cert_cn]
-        else:
-            raise RenewError(renew_config_name,
-                             "Unknown certificate issuer CN {}".format(cert_cn))
 
     else:
         root_cert_url = "https://letsencrypt.org/certs/staging/letsencrypt-stg-root-x1.pem"
@@ -256,26 +266,32 @@ def do_renew(logger_manager, renew_config, renew_config_name, renew_args, issuer
     logger_manager.log(Loglevel.INFO, "Downloaded root cert from {}".format(root_cert_url))
     root_cert = root_cert_request.text
 
-    if not renew_args.staging:
-        intermediate_cert_request = requests.get(intermediate_cert_url)
+    cert_cn_split = cert_cn.split()
 
-        if not intermediate_cert_request.ok:
-            raise RenewError(renew_config_name,
-                             "Failed to download intermediate cert from {}".format(intermediate_cert_url))
-
-        logger_manager.log(Loglevel.INFO, "Downloaded intermediate cert from {}".format(intermediate_cert_url))
-        intermediate_cert = intermediate_cert_request.text
+    # Staging certs are more wordy, however the most important bit is the last 'word' still.
+    if cert_cn_split[-1] in issuer_map.keys():
+        intermediate_cert_url = issuer_map[cert_cn_split[-1]]
     else:
-        intermediate_cert = ''
+        raise RenewError(renew_config_name,
+                         "Unknown certificate issuer CN {}".format(cert_cn_split[-1]))
+
+    intermediate_cert_request = requests.get(intermediate_cert_url)
+
+    if not intermediate_cert_request.ok:
+        raise RenewError(renew_config_name,
+                         "Failed to download intermediate cert from {}".format(intermediate_cert_url))
+
+    logger_manager.log(Loglevel.INFO, "Downloaded intermediate cert from {}".format(intermediate_cert_url))
+    intermediate_cert = intermediate_cert_request.text
 
     # install.
     domain_cert_dir, domain_cert_file = os.path.split(domain_cert_name)
 
     # first, back from whence it came.
-    install_certs(domain_cert_dir, domain_cert_file, domain_cert, intermediate_cert, root_cert)
+    install_certs(domain_cert_dir, domain_cert_file, domain_cert, intermediate_cert, root_cert, renew_args.staging)
 
     # then to any install directories.
-    if "install_dir" in renew_config:
+    if not renew_args.staging and "install_dir" in renew_config:
 
         install_dir_array = renew_config.get("install_dir").split(',')
 
@@ -292,7 +308,7 @@ def do_renew(logger_manager, renew_config, renew_config_name, renew_args, issuer
             elif not os.path.isdir(install_dir):
                 raise ConfigError(renew_config_name, "Install directory {} isn't a directory".format(install_dir))
 
-            install_certs(install_dir, domain_cert_file, domain_cert, intermediate_cert, root_cert)
+            install_certs(install_dir, domain_cert_file, domain_cert, intermediate_cert, root_cert, renew_args.staging)
 
             logger_manager.log(Loglevel.INFO, "Installed certs to {}".format(install_dir))
 
@@ -329,16 +345,24 @@ if __name__ == "__main__":
 
     issuer_map = {}
 
-    # Add all cert providers, including backups.
-    for issuer_no in range(5, 19):
-        issuer_map['E{}'.format(issuer_no)] = 'https://letsencrypt.org/certs/2024/e{}.pem'.format(issuer_no)
+    if args.staging:
+        for issuer_no in range(1, 4):
+            issuer_map[f'YE{issuer_no}'] = 'https://letsencrypt.org/certs/staging/gen-y/root-ye-by-x2.pem'
+            issuer_map[f'YR{issuer_no}'] = 'https://letsencrypt.org/certs/staging/gen-y/root-yr.pem'
+        
+    else:
+        # Add all cert providers, including backups.
+        for issuer_no in range(5, 19):
+            issuer_map['E{}'.format(issuer_no)] = 'https://letsencrypt.org/certs/2024/e{}.pem'.format(issuer_no)
 
-    for issuer_no in range(10, 15):
-        issuer_map['R{}'.format(issuer_no)] = 'https://letsencrypt.org/certs/2024/r{}.pem'.format(issuer_no)
+        for issuer_no in range(10, 15):
+            issuer_map['R{}'.format(issuer_no)] = 'https://letsencrypt.org/certs/2024/r{}.pem'.format(issuer_no)
 
-    for issuer in range(1, 2):
-        issuer_map[f'YE{issuer_no}'] = f'https://letsencrypt.org/certs/gen-y/int-ye{issuer_no}.pem'
-        issuer_map[f'YR{issuer_no}'] = f'https://letsencrypt.org/certs/gen-y/int-yr{issuer_no}.pem'
+        for issuer_no in range(1, 3):
+            issuer_map[f'YE{issuer_no}'] = f'https://letsencrypt.org/certs/gen-y/int-ye{issuer_no}.pem'
+            issuer_map[f'YR{issuer_no}'] = f'https://letsencrypt.org/certs/gen-y/int-yr{issuer_no}.pem'
+
+    print(issuer_map)
 
     for section_name in config.sections():
 
@@ -355,6 +379,12 @@ if __name__ == "__main__":
         except RenewError as e:
             logger_manager.log(Loglevel.ERROR, e.GetMessage())
 
+
+        except CalledProcessError as e:
+            logger_manager.log(Loglevel.ERROR, 
+                f"{e.stdout}\nCommand {e.cmd} returned {e.returncode}\n \
+                   {e.stderr}"
+            )
 
         except:
             logger_manager.log(Loglevel.ERROR, format_exc())
